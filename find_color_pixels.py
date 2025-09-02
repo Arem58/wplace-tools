@@ -1,14 +1,18 @@
 
-from PIL import Image, ImageDraw
+from PIL import Image
 import numpy as np
 import pandas as pd
 import os
-from typing import Tuple
+from typing import Tuple, Union
+
+from functions.detect_colors.palette import load_palette, resolve_target
+
+TargetType = Union[Tuple[int, int, int], str]
 
 def find_and_export_color(
     image_path: str,
-    target_rgb: Tuple[int, int, int],
-    tol: int = 0,
+    target: TargetType,
+    palette_json: str,
     canvas_origin: Tuple[int, int] = (0, 0),
     out_prefix: str = ""
 ):
@@ -25,23 +29,26 @@ def find_and_export_color(
     - mask_...png   : máscara RGBA que deja visibles solo los píxeles del color.
     - preview_...png: vista previa: imagen atenuada + píxeles del color resaltados.
     """
+
+    palette = load_palette(palette_json)
+    resolved = resolve_target(target, palette)
+    R, G, B = resolved["rgb"]
+    target_name = resolved["name"]
+    target_premium = resolved["premium"]
+
     base = os.path.splitext(os.path.basename(image_path))[0]
-    safe_rgb = f"{target_rgb[0]}_{target_rgb[1]}_{target_rgb[2]}"
-    tag = f"{out_prefix}_rgb_{safe_rgb}_tol_{tol}".strip("_")
-    csv_path = f"coords_{base}_{tag}.csv"
-    mask_path = f"mask_{base}_{tag}.png"
-    preview_path = f"preview_{base}_{tag}.png"
+    safe_rgb = f"{R}_{G}_{B}"
+    safe_name = (target_name or "unknown").replace(" ", "_")
+    tag = f"{out_prefix}_{safe_name}_rgb_{safe_rgb}".strip("_")
+    csv_path = f"output/find_color/coords_{base}_{tag}.csv"
+    mask_path = f"output/find_color/mask_{base}_{tag}.png"
+    preview_path = f"output/find_color/preview_{base}_{tag}.png"
 
     img = Image.open(image_path).convert("RGB")
     arr = np.array(img)
 
-    R, G, B = target_rgb
-    mask = (
-        (np.abs(arr[:,:,0] - R) <= tol) &
-        (np.abs(arr[:,:,1] - G) <= tol) &
-        (np.abs(arr[:,:,2] - B) <= tol)
-    )
-
+    # TOLERANCIA 0 – coincidencia exacta
+    mask = ((arr[:,:,0] == R) & (arr[:,:,1] == G) & (arr[:,:,2] == B))
     ys, xs = np.where(mask)
     count = len(xs)
 
@@ -50,12 +57,14 @@ def find_and_export_color(
         sub = arr[mask]
         df = pd.DataFrame({
             "x": xs, "y": ys,
-            "X": xs + canvas_origin[0],  # coords en lienzo
+            "X": xs + canvas_origin[0],
             "Y": ys + canvas_origin[1],
             "r": sub[:,0], "g": sub[:,1], "b": sub[:,2],
+            "name": target_name,
+            "premium": target_premium
         })
     else:
-        df = pd.DataFrame(columns=["x","y","X","Y","r","g","b"])
+        df = pd.DataFrame(columns=["x","y","X","Y","r","g","b","name","premium"])
     df.to_csv(csv_path, index=False)
 
     # Máscara RGBA (solo ese color visible)
@@ -63,19 +72,21 @@ def find_and_export_color(
     out = np.zeros((h, w, 4), dtype=np.uint8)
     out[:,:,:3] = arr
     out[:,:,3] = (mask * 255).astype(np.uint8)
-    Image.fromarray(out, mode="RGBA").save(mask_path)
+    from PIL import Image as _Image
+    _Image.fromarray(out, mode="RGBA").save(mask_path)
 
     # Preview: fondo atenuado + píxeles destino fuertes
-    preview = Image.fromarray(arr).convert("RGBA")
+    preview = _Image.fromarray(arr).convert("RGBA")
     # Atenuar todo
-    over = Image.new("RGBA", preview.size, (0,0,0,180))
-    preview = Image.alpha_composite(preview, over)
+    over = _Image.new("RGBA", preview.size, (0,0,0,180))
+    preview = _Image.alpha_composite(preview, over)
     # Colocar solo los píxeles del color por encima
-    only = Image.fromarray(out, mode="RGBA")
-    preview = Image.alpha_composite(preview, only)
+    only = _Image.fromarray(out, mode="RGBA")
+    preview = _Image.alpha_composite(preview, only)
     preview.save(preview_path)
 
-    print(f"[OK] {target_rgb} -> {count} px")
+    print(f"[TARGET] {target} -> RGB {(R,G,B)} | name={target_name} premium={target_premium}")
+    print(f"[OK] {(R,G,B)} -> {count} px")
     print(f"CSV: {csv_path}")
     print(f"MASK: {mask_path}")
     print(f"PREVIEW: {preview_path}")
@@ -84,8 +95,11 @@ def find_and_export_color(
 if __name__ == "__main__":
     # --- EJEMPLO DE USO ---
     # Cambia estos valores por los tuyos:
-    image_path = "assets/converted_ChatGPT Image Aug 20, 2025, 09_15_42 PM.png"
-    target_rgb = (15, 183, 154)
-    tol = 0
-    canvas_origin = (0, 0)  # mueve esto si tu plantilla empieza más a la derecha/abajo
-    find_and_export_color(image_path, target_rgb, tol, canvas_origin, out_prefix="demo")
+    image_path = "assets/converted_WhatsApp Image 2025-08-22 at 1.22.53 AM.jpeg.jpg"
+    palette_json = "assets/wplace-color.json"
+
+    target="Black"
+    # target_rgb = (15, 183, 154)
+    # tol = 0
+    # canvas_origin = (0, 0)  # mueve esto si tu plantilla empieza más a la derecha/abajo
+    find_and_export_color(image_path, target, palette_json)

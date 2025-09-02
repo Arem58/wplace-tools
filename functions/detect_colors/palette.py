@@ -1,138 +1,57 @@
-# functions/detect_colors/palette.py
+# palette_utils.py
 import json
-from typing import Tuple, Dict, Optional, List
-import pandas as pd
-import math
+from typing import Dict, List, Tuple, Optional
 
 RGB = Tuple[int, int, int]
 
-# ---------- Utilidades básicas ----------
-def hex_to_rgb(hexstr: str) -> RGB:
-    h = hexstr.strip().lstrip("#")
-    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-
-def rgb_to_hex(rgb: RGB) -> str:
-    r,g,b = rgb
-    return f"#{r:02X}{g:02X}{b:02X}"
-
-# ---------- Carga única y construcción de índice ----------
-def _load_palette(palette_json_path: str) -> List[dict]:
-    with open(palette_json_path, "r", encoding="utf-8") as f:
+def load_palette(json_path: str) -> List[Dict]:
+    with open(json_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     for d in data:
-        d["rgb"] = hex_to_rgb(d["color"])
+        d["rgb"] = tuple(d["rgb"])
     return data
 
-def _build_rgb_index(palette: List[dict]) -> Dict[RGB, dict]:
-    idx: Dict[RGB, dict] = {}
+def palette_by_rgb(palette: List[Dict]) -> Dict[RGB, Dict]:
+    return {item["rgb"]: item for item in palette}
+
+def find_by_name(palette: List[Dict], name: str) -> Optional[Dict]:
+    name_lc = name.strip().lower()
     for item in palette:
-        idx[tuple(item["rgb"])] = item  # último gana si hay duplicados
-    return idx
+        if item["name"].lower() == name_lc:
+            return item
+    return None
 
-# ---------- Búsqueda ----------
-def _nearest_in_palette(rgb: RGB, palette: List[dict]) -> dict:
-    r,g,b = rgb
-    best, best_d2 = None, float("inf")
-    for p in palette:
-        pr,pg,pb = p["rgb"]
-        d2 = (r-pr)**2 + (g-pg)**2 + (b-pb)**2
-        if d2 < best_d2:
-            best, best_d2 = p, d2
-    return best
+def find_exact_in_palette(rgb: RGB, palette: List[Dict]) -> Optional[Dict]:
+    return palette_by_rgb(palette).get(rgb)
 
-def get_color_info(
-    rgb: RGB,
-    palette_json_path: str,
-    use_nearest: bool = True,
-    _cache: dict = {}
-) -> Dict[str, Optional[str]]:
+def resolve_target(target, palette: List[Dict]) -> Dict:
     """
-    Devuelve dict:
-      name, hex, id, isPremium, match ('exact'|'nearest'|'none'), palette_rgb (tupla)
+    Acepta:
+      - (r,g,b) que DEBE existir en paleta
+      - "Nombre" (debe existir)
+      - "id:NN" (debe existir)
+    Retorna: {"rgb":(r,g,b), "name":str, "premium":bool, "source": "..."}
     """
-    if palette_json_path not in _cache:
-        pal = _load_palette(palette_json_path)
-        _cache[palette_json_path] = {
-            "palette": pal,
-            "index": _build_rgb_index(pal),
-        }
-    palette = _cache[palette_json_path]["palette"]
-    index = _cache[palette_json_path]["index"]
+    if isinstance(target, tuple) and len(target) == 3:
+        item = find_exact_in_palette(target, palette)
+        if not item:
+            raise ValueError(f"RGB {target} no existe en la paleta.")
+        return {"rgb": item["rgb"], "name": item["name"], "premium": item["premium"], "source": "exact_rgb"}
 
-    p = index.get(tuple(rgb))
-    if p:
-        return {
-            "name": p["name"],
-            "hex": p["color"],
-            "id": p.get("id"),
-            "isPremium": p.get("isPremium", False),
-            "match": "exact",
-            "palette_rgb": tuple(p["rgb"])
-        }
+    if isinstance(target, str):
+        t = target.strip()
+        if t.lower().startswith("id:"):
+            try:
+                wanted = int(t.split(":", 1)[1])
+            except ValueError:
+                raise ValueError(f"ID inválido en target: {target}")
+            for it in palette:
+                if it["id"] == wanted:
+                    return {"rgb": it["rgb"], "name": it["name"], "premium": it["premium"], "source": "by_id"}
+            raise ValueError(f"No se encontró id {wanted} en la paleta.")
+        item = find_by_name(palette, t)
+        if item:
+            return {"rgb": item["rgb"], "name": item["name"], "premium": item["premium"], "source": "by_name"}
+        raise ValueError(f"No se encontró el nombre '{target}' en la paleta.")
 
-    if not use_nearest:
-        return {
-            "name": None, "hex": None, "id": None, "isPremium": None,
-            "match": "none", "palette_rgb": None
-        }
-
-    p = _nearest_in_palette(rgb, palette)
-    return {
-        "name": p["name"],
-        "hex": p["color"],
-        "id": p.get("id"),
-        "isPremium": p.get("isPremium", False),
-        "match": "nearest",
-        "palette_rgb": tuple(p["rgb"])
-    }
-
-def map_df_colors(
-    df: pd.DataFrame,
-    palette_json_path: str,
-    use_nearest: bool = True
-) -> pd.DataFrame:
-    """
-    Añade name, hex, id, match a un DF con r,g,b.
-    Usa la paleta indexada en cache para acelerar (no recarga por fila).
-    """
-    rows = []
-    for _, row in df.iterrows():
-        rgb = (int(row["r"]), int(row["g"]), int(row["b"]))
-        info = get_color_info(rgb, palette_json_path, use_nearest=use_nearest)
-        rows.append({
-            "name": info["name"],
-            "hex": info["hex"],
-            "id": info["id"],
-            "isPremium": info["isPremium"],   # <---
-            "match": info["match"],
-        })
-    info_df = pd.DataFrame(rows, index=df.index)
-    return pd.concat([df.reset_index(drop=True), info_df.reset_index(drop=True)], axis=1)
-
-# ---------- Extras útiles para tu flujo ----------
-def require_color_exact(rgb: RGB, palette_json_path: str):
-    """Lanza ValueError si el RGB no existe en la paleta (modo estricto)."""
-    info = get_color_info(rgb, palette_json_path, use_nearest=False)
-    if info["match"] != "exact":
-        raise ValueError(
-            f"RGB {rgb} no existe en la paleta permitida ({palette_json_path}). "
-            f"Sugerencia: verifica la exportación de la web. HEX esperado: {rgb_to_hex(rgb)}."
-        )
-    return info
-
-def verify_image_palette(image_path: str, palette_json_path: str) -> List[RGB]:
-    """
-    Devuelve lista de RGB que aparecen en la imagen pero NO están en la paleta.
-    Lista vacía => todo OK.
-    """
-    from PIL import Image
-    import numpy as np
-
-    # cache: no recargar paleta
-    pal = _load_palette(palette_json_path)
-    idx = _build_rgb_index(pal)
-
-    arr = np.array(Image.open(image_path).convert("RGB")).reshape(-1, 3)
-    uniq = {tuple(x) for x in arr}
-    unknown = [rgb for rgb in uniq if rgb not in idx]
-    return sorted(unknown)
+    raise ValueError("target debe ser (r,g,b) o str (nombre o 'id:NN').")
